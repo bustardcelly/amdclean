@@ -170,6 +170,14 @@
                         node.init.callee.property &&
                         node.init.callee.property.name);
             },
+            isRequireConfigExpress: function(node) {
+                return (node.expression &&
+                        node.expression.callee && 
+                        node.expression.callee.object && 
+                        (node.expression.callee.object.name === 'require' || node.expression.callee.object.name === 'requirejs') &&
+                        node.expression.callee.property &&
+                        node.expression.callee.property.name === 'config');
+            },
             // isObjectExpression
             // ------------------
             //  Returns if the current AST node is an object literal
@@ -206,6 +214,9 @@
                 } else {
                     return name;
                 }
+            },
+            normalizeConfigModuleName: function(name) {
+                return name + '_module';
             },
             // convertCommonJSDeclaration
             // --------------------------
@@ -332,6 +343,66 @@
                     ],
                     'kind': 'var'
                 };
+            },
+            convertToModuleConfigurationDeclaration: function(name, properties) {
+                return {
+                    'type': 'VariableDeclaration',
+                    'declarations': [
+                        {
+                            'type': 'VariableDeclarator',
+                            'id': {
+                                'type': 'Identifier',
+                                'name': name
+                            },
+                            'init': {
+                                'type': 'ObjectExpression',
+                                'properties': [
+                                    {
+                                        'type': 'Property',
+                                        'key': {
+                                            'type': 'Identifier',
+                                            'name': 'config'
+                                        },
+                                        'value': {
+                                            'type': 'FunctionExpression',
+                                            'id': null,
+                                            'params': [],
+                                            'defaults': [],
+                                            'body': {
+                                                'type': 'BlockStatement',
+                                                'body': [ 
+                                                    {
+                                                        'type': 'ReturnStatement',
+                                                        'argument': {
+                                                            'type': 'ObjectExpression',
+                                                            'properties': properties
+                                                    }    
+                                                }]
+                                             }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    'kind': 'var'
+                };
+            },
+            convertModuleConfigurations: function(properties) {
+                var i,
+                    length = properties.length,
+                    declarations = [],
+                    property,
+                    configModuleName,
+                    declaration;
+                
+                for(i = 0; i < length; i++) {
+                    property = properties[i];
+                    configModuleName = publicAPI.normalizeConfigModuleName(publicAPI.normalizeModuleName(property.key.value));
+                    declaration = publicAPI.convertToModuleConfigurationDeclaration(configModuleName, property.value.properties);
+                    declarations.push(declaration);
+                }
+                return declarations
             },
             // convertToIIFE
             // -------------
@@ -486,22 +557,27 @@
                         return node;
                     }
                     args = node.expression['arguments'];
-                    dependencies = (function() {
+                    moduleReturnValue = args[args.length - 1];
+                    moduleName = publicAPI.normalizeModuleName(node.expression['arguments'][0].value);
+                    dependencies = (function(moduleName) {
                         var deps = _.isPlainObject(args[args.length - 2]) ? args[args.length - 2].elements : [],
                         depNames = [];
                         if(Array.isArray(deps) && deps.length) {
                             _.each(deps, function(currentDependency) {
                                 if(publicAPI.dependencyBlacklist[currentDependency.value]) {
-                                    depNames.push('{}');
+                                    if(currentDependency.value === 'module') {
+                                        depNames.push(publicAPI.normalizeConfigModuleName(moduleName));
+                                    }
+                                    else {
+                                        depNames.push('{}');
+                                    }
                                 } else {
                                     depNames.push(currentDependency.value);
                                 }
                             });
                         }
                         return depNames;
-                    }()),
-                    moduleReturnValue = args[args.length - 1];
-                    moduleName = publicAPI.normalizeModuleName(node.expression['arguments'][0].value);
+                    }(moduleName)),
                     params = {
                             node: node,
                             moduleName: moduleName,
@@ -603,9 +679,11 @@
                 });
                 // Removes all empty statements from the source so that there are no single semicolons and
                 // Make sure that all require() CommonJS calls are converted
+                // console.log('body: ' + JSON.stringify(ast.body, null, 2));
                 if(ast && _.isArray(ast.body)) {
                     estraverse.replace(ast, {
                         enter: function(node, parent) {
+                            // console.log('node type: ' + node.type);
                             if(node === undefined || node.type === 'EmptyStatement') {
                                 _.each(parent.body, function(currentNode, iterator) {
                                     if(currentNode === undefined || currentNode.type === 'EmptyStatement') {
@@ -620,7 +698,21 @@
                                 });
                                 return node;
                             }
-
+                            else if(node.type === 'ExpressionStatement') {
+                                if(publicAPI.isRequireConfigExpress(node)) {
+                                    var i,
+                                        props = node.expression.arguments[0].properties,
+                                        length = props.length,
+                                        declarations;
+                                    for(i = 0; i < length; i++) {
+                                        if(props[i].key.name === 'config') {
+                                            declarations = publicAPI.convertModuleConfigurations(props[i].value.properties);
+                                            parent.body.push.apply(parent.body, declarations);
+                                            parent.body.splice(parent.body.indexOf(node), 1);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     });
                 }
